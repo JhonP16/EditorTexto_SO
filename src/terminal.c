@@ -3,9 +3,12 @@
 #include <unistd.h>    // Para constantes de descriptores de archivos del estándar POSIX (STDIN_FILENO, etc.)
 #include <stdlib.h>    // Para utilidades estándar, como registrar funciones de limpieza al salir (atexit)
 #include <sys/ioctl.h> // Para la llamada al sistema ioctl() que permite consultar dimensiones de la ventana (TIOCGWINSZ)
+#include <stdio.h>     // Para perror(), que reporta los fallos de las llamadas al sistema
 
 // Guardamos el estado original de la terminal para restaurarlo al salir.
-struct termios termios_original;
+// Es 'static' porque nadie fuera de este módulo debe manipularla: sólo
+// terminal_activar_modo_raw y terminal_desactivar_modo_raw saben interpretarla.
+static struct termios termios_original;
 
 /**
  * ESTRATEGIA CON SYSTEM CALLS:
@@ -33,13 +36,17 @@ struct termios termios_original;
 
 void terminal_desactivar_modo_raw() {
     // Restauramos los atributos originales de la entrada estándar (teclado).
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &termios_original);
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &termios_original) == -1)
+        perror("tcsetattr (restaurar modo cooked)");
 }
 
 void terminal_activar_modo_raw() {
     // 1. Obtener la configuración actual del Kernel
-    tcgetattr(STDIN_FILENO, &termios_original);
-    
+    if (tcgetattr(STDIN_FILENO, &termios_original) == -1) {
+        perror("tcgetattr (la entrada estándar no es una terminal)");
+        return;
+    }
+
     // 2. Registrar la función de restauración para que se ejecute si el programa termina
     atexit(terminal_desactivar_modo_raw);
 
@@ -60,7 +67,8 @@ void terminal_activar_modo_raw() {
     raw.c_cc[VTIME] = 0; // Sin límite de tiempo (espera infinita)
 
     // 5. Aplicar la nueva configuración al Kernel
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1)
+        perror("tcsetattr (activar modo raw)");
 }
 
 /**

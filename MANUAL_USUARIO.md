@@ -1,67 +1,156 @@
-# Manual de Usuario - Editor
+# Manual de Usuario - Editor de Texto
 
-Bienvenido al **Editor de Texto**.
-
-
-
- Este es un editor ágil y minimalista que opera directamente en modo texto (CLI), construido para funcionar desde la consola de Linux sin requerir interfaces gráficas pesadas.
+Bienvenido al **Editor de Texto**: un editor ágil y minimalista que opera directamente en modo texto (CLI), construido para funcionar desde la consola de Linux sin requerir interfaces gráficas pesadas.
 
 ---
 
 ## 1. Compilación e Inicio
 
-Antes de utilizar el editor por primera vez, debes compilar el código fuente ejecutando la herramienta de construcción `make`:
+Antes de utilizar el editor por primera vez, compila el código fuente con `make`:
 
 ```bash
 make clean
 make
 ```
 
-Para abrir un archivo de texto existente o crear uno nuevo en blanco, ejecuta el programa binario pasándole el nombre del archivo como argumento:
+---
+
+## 2. Los dos modos del editor
+
+El editor ofrece las mismas funciones de dos maneras distintas. **Los dos modos ejecutan exactamente los mismos comandos**; sólo cambia cómo se los pides.
 
 ```bash
-./editor mi_archivo.txt
+./editor demo.txt        # MODO VISUAL: pantalla completa, con atajos de teclado
+./editor -c demo.txt     # MODO CLI: intérprete de línea clásico, al estilo de 'ed'
 ```
 
-./editor demo.txt
+Si no pasas ningún archivo, el editor trabaja sobre `archivo.txt`, creándolo si no existe.
 
+### Modo CLI (`-c` o `--cli`)
 
+Un prompt donde escribes los comandos tal cual, uno por línea:
 
-## 2. Entorno y Barra de Estado
+```
+$ ./editor -c demo.txt
+Archivo 'demo.txt' abierto: fd=3, 3 linea(s), 13 byte(s).
+editor> p
+   1 | uno
+   2 | dos
+   3 | tres
+editor> d 2
+Linea 2 borrada. Quedan 2 linea(s).
+editor> i 1 encabezado
+Texto insertado como linea 1. Ahora hay 3 linea(s).
+editor> q
+```
 
-Una vez dentro, verás el contenido de tu documento y una **Barra de Estado** resaltada en la fila inferior de tu consola. Esta barra se actualiza en tiempo real y te muestra:
+### Modo visual (sin banderas)
 
-* El nombre del archivo actual (`mi_archivo.txt` o `[Nuevo]` si olvidaste pasar un argumento).
-* La posición de tu cursor indicada por **Fila** (Línea) y **Columna**.
-* Un recordatorio rápido de los atajos principales del sistema.
+Pantalla completa con el texto a la vista. Cada comando tiene su atajo de teclado y, si necesita datos, **te los pide por pantalla**. Por ejemplo, `Ctrl+D`:
+
+```
+==== BORRAR LÍNEA (comando d) ====
+
+Número de línea [3]:
+```
+
+El número entre corchetes es la línea donde está tu cursor: pulsar ENTER en vacío borra *esa* línea. Si quieres otra, escribes su número.
+
+### Modo automático
+
+Si la entrada estándar no es un teclado sino una tubería, el editor entra solo al modo CLI. Eso permite guionizarlo y, más adelante, invocarlo desde un shell:
+
+```bash
+printf 'a hola\np\nq\n' | ./editor demo.txt
+```
 
 ---
 
-## 3. Navegación y Edición Básica
+## 3. Tabla de comandos
 
-Para editar el documento, simplemente empieza a escribir. El texto se irá insertando de forma fluida.
-Puedes moverte libremente por el documento utilizando:
+| Comando | Atajo visual | Qué hace |
+| :--- | :--- | :--- |
+| `o [archivo]` | `Ctrl + O` | Abre un archivo. Si no existe, lo crea. |
+| `p` | — | Imprime todo el archivo numerado. |
+| `p [n]` | `Ctrl + V` | Imprime la línea *n*. |
+| `a [texto]` | `Ctrl + A` | Añade el texto como nueva última línea. |
+| `d [n]` | `Ctrl + D` | Borra la línea *n* y recorta el archivo. |
+| `i [n] [texto]` | `Ctrl + N` | Inserta el texto como línea *n*, desplazando el resto. |
+| `s [palabra]` | `Ctrl + F` | Busca la palabra y lista todas las coincidencias con línea y columna. En modo visual, además lleva el cursor a la primera. |
+| `m` | `Ctrl + G` | Metadatos: tamaño, permisos, inodo, fecha de modificación. |
+| `y [n]` | `Ctrl + Y` | Copia la línea *n* al portapapeles (se van acumulando). |
+| `y` | — | Muestra el contenido del portapapeles. |
+| `yc` | — | Vacía el portapapeles. |
+| `x [n]` | `Ctrl + U` | Pega **todo** el portapapeles a partir de la línea *n*. |
+| `h` | `Ctrl + H` | Ayuda. |
+| `q` | `Ctrl + Q` | Cierra el archivo, libera la memoria y sale. |
 
-* **Teclas de Dirección**: Flechas `Arriba`, `Abajo`, `Izquierda`, `Derecha`.
-* **W, A, S, D**: A modo de atajo alternativo para usuarios ágiles, estas cuatro letras actúan como flechas de navegación directas, evitando tener que mover tu mano derecha lejos del centro del teclado.
-* **Backspace (Retroceso) / Enter**: Funcionan de manera habitual para eliminar caracteres hacia atrás o dividir líneas.
+Los comandos sin atajo propio (`p` completo, `y` sin argumento, `yc`) se escriben en la **línea de comandos libre**, que abre `Ctrl + L`: aparece un prompt `:` donde puedes teclear cualquier comando completo.
+
+En los atajos que piden un número de línea, pulsar ENTER en vacío usa la línea del cursor.
+
+### Cómo funciona el portapapeles
+
+Es **secuencial**: cada `y` encola una línea más, y `x` las pega todas juntas en el orden en que las copiaste.
+
+```
+y 3      -> el portapapeles tiene 1 línea (la vieja línea 3)
+y 1      -> el portapapeles tiene 2 líneas (la 3 y luego la 1)
+x 5      -> inserta ambas a partir de la línea 5, en ese mismo orden
+yc       -> lo vacía para empezar de nuevo
+```
 
 ---
 
-## 4. Atajos de Comandos (Ctrl)
+## 4. El entorno visual
 
-El editor se controla mediante combinaciones rápidas utilizando la tecla `Control (Ctrl)`. Todos los comandos operan de manera instantánea:
+### Barra de Estado
 
-* **`Ctrl + S` (Guardar Documento)**: Escribe todos tus cambios en el disco duro. Al presionarlo, la pantalla se pausará y mostrará un *log* confirmando la llamada al sistema de escritura. Solo presiona `ENTER` para retomar tu edición.
-* **`Ctrl + Q` (Salir del Editor)**: Cierra inmediatamente el editor, limpia la pantalla y te regresa a tu línea de comandos regular. ¡Recuerda hacer `Ctrl+S` antes de salir para no perder nada!
-* **`Ctrl + F` (Buscar Palabra)**: Congela el entorno y te abre un menú de búsqueda en la parte inferior. Escribe la palabra que deseas localizar y presiona `ENTER`. El cursor viajará mágicamente a la coincidencia.
+En la fila inferior verás el nombre del archivo (con un `*` si tienes cambios escritos a mano sin guardar), la posición del cursor en **Fila** y **Columna**, y un recordatorio de los atajos principales.
+
+### Navegación y edición
+
+Para editar, simplemente empieza a escribir. Puedes moverte con:
+
+* **Teclas de dirección**: flechas Arriba, Abajo, Izquierda, Derecha.
+* **W, A, S, D**: atajo alternativo para no mover la mano del centro del teclado.
+* **Backspace / Enter**: borran hacia atrás o dividen líneas, como es habitual.
+
+### Atajos del entorno (además de los de la tabla)
+
+| Atajo | Acción |
+| :--- | :--- |
+| `Ctrl + L` | Línea de comandos libre: escribe cualquier comando completo. |
+| `Ctrl + S` | Guarda el documento y muestra el registro de las llamadas al sistema. |
+| `Ctrl + H` | Muestra u oculta la ayuda. |
+| `Ctrl + E` | Visor de la estructura de datos en memoria. |
+| `Ctrl + P` | Monitor de memoria del proceso. |
+
+> `Ctrl + M`, `Ctrl + I` y `Ctrl + J` no se usan como atajos: la terminal los envía como ENTER y TAB, así que no se pueden distinguir de esas teclas.
+
+### Sobre los cambios sin guardar
+
+Los comandos trabajan sobre los **bytes reales del archivo en disco**. Por eso, si tienes cambios escritos a mano que aún no has guardado, el editor los persiste automáticamente antes de ejecutar el comando y recarga la vista después, dejando el cursor lo más cerca posible de donde estaba. Así nunca ves una pantalla que no corresponda con el archivo.
 
 ---
 
 ## 5. Herramientas de Diagnóstico (Modales)
 
-Como característica especial, el editor SO2026B incluye "Pantallas Modales" interactivas (se superponen al texto). Para salir de ellas y volver a la edición, simplemente **vuelve a presionar el mismo atajo que las abrió**.
+Pantallas que se superponen al texto. Para salir de ellas, **vuelve a presionar el mismo atajo que las abrió**.
 
-* **`Ctrl + H` (Menú de Ayuda)**: Despliega en el centro de la pantalla la lista maestra de comandos para que nunca te pierdas.
-* **`Ctrl + E` (Visor de Estructura)**: Destripa el archivo mostrándote cómo están organizadas físicamente las palabras dentro de la RAM. Muestra punteros de Listas Enlazadas de los nodos.
-* **`Ctrl + P` (Monitor de Memoria OS)**: Extrae e imprime la telemetría del núcleo de Linux (`/proc/self/status`), mostrándole al programador cuántos kilobytes está consumiendo el Editor en el segmento *Heap* (mallocs) y en el segmento *Stack*.
+* **`Ctrl + H` (Ayuda)**: la lista maestra de atajos y comandos.
+* **`Ctrl + E` (Visor de Estructura)**: muestra cómo están organizadas físicamente las líneas y palabras en la RAM, con las direcciones de los nodos de las listas enlazadas.
+* **`Ctrl + P` (Monitor de Memoria)**: lee `/proc/self/status` y `/proc/self/maps` con `open()`/`read()` y te muestra cuánta memoria consume el editor en los segmentos *Heap* y *Stack*.
+
+---
+
+## 6. Pruebas
+
+El proyecto trae un banco de pruebas automático con 52 escenarios: cada comando, cada caso borde y los atajos del modo visual (que se ejercitan enviando pulsaciones reales a un pseudo-terminal).
+
+```bash
+make test                    # o bien:  bash pruebas.sh
+SIN_VISUAL=1 bash pruebas.sh # omite las pruebas del modo visual, que son lentas
+```
+
+Termina con código 0 si todo pasa e informa qué falló en caso contrario.

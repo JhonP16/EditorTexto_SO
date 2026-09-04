@@ -1,9 +1,12 @@
 #include "comando.h"
 #include "terminal.h"
+#include "cli.h"      // Despachador de comandos compartido con el modo tubería
+#include "cadena.h"   // Buffer dinámico para leer /proc sin usar stdio
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdio.h> // Para printf, fgets, etc.
+#include <fcntl.h>    // open() y sus flags
+#include <stdio.h>    // Sólo para printf/fgets/getchar sobre STDIN y STDOUT
 
 // ============================================================================
 // FUNCIONES DE UI PROPIAS DE COMANDOS
@@ -35,18 +38,32 @@ void comando_mostrar_log_sistema(const char *titulo, const char *log) {
  * Escribe directamente a la salida estándar usando códigos ANSI.
  */
 static void comando_dibujar_ayuda(void) {
-    char *texto = 
-        "=================================================\r\n"
-        "            AYUDA DE COMANDOS DEL EDITOR         \r\n"
-        "=================================================\r\n\r\n"
+    char *texto =
+        "===============================================================\r\n"
+        "                  AYUDA DEL EDITOR EAFIT                       \r\n"
+        "===============================================================\r\n\r\n"
+        "\x1b[1;36mCOMANDOS DEL EDITOR\x1b[0m  (cada uno pide los datos que necesite)\r\n"
+        "  Ctrl + O : o [archivo]    Abrir o crear un archivo     (open)\r\n"
+        "  Ctrl + V : p [n]          Ver una línea                (lseek + read)\r\n"
+        "  Ctrl + A : a [texto]      Añadir línea al final        (lseek + write)\r\n"
+        "  Ctrl + D : d [n]          Borrar una línea             (write + ftruncate)\r\n"
+        "  Ctrl + N : i [n] [texto]  Insertar en la línea n       (read + lseek + write)\r\n"
+        "  Ctrl + F : s [palabra]    Buscar y saltar al resultado\r\n"
+        "  Ctrl + G : m              Metadatos del archivo        (fstat)\r\n"
+        "  Ctrl + Y : y [n]          Copiar línea al portapapeles\r\n"
+        "  Ctrl + U : x [n]          Pegar el portapapeles\r\n"
+        "  Ctrl + Q : q              Salir liberando todo         (close)\r\n\r\n"
+        "  \x1b[1;33mLos atajos con número de línea usan la del cursor si pulsas ENTER.\x1b[0m\r\n\r\n"
+        "\x1b[1;36mENTORNO VISUAL\x1b[0m\r\n"
+        "  Ctrl + L : Línea de comandos libre (escribe cualquier comando: yl, yc, h...)\r\n"
         "  Ctrl + S : Guardar el documento actual\r\n"
-        "  Ctrl + Q : Salir del editor\r\n"
         "  Ctrl + H : Mostrar / Ocultar esta ayuda\r\n"
         "  Ctrl + E : Mostrar Estructura de Datos\r\n"
-        "  Ctrl + F : Buscar palabra\r\n\r\n"
+        "  Ctrl + P : Monitor de memoria del proceso\r\n"
         "  Flechas  : Navegar por el texto\r\n"
         "  W A S D  : Navegación alternativa\r\n\r\n"
-        "=================================================\r\n"
+        "  \x1b[1;33mEl modo CLI clásico ('editor> ') se abre con:  ./editor -c archivo\x1b[0m\r\n\r\n"
+        "===============================================================\r\n"
         "Presiona 'Ctrl + H' para volver a la edición...\r\n";
     write(STDOUT_FILENO, texto, strlen(texto));
 }
@@ -90,10 +107,68 @@ static void comando_dibujar_estructura(EstadoEditor *e) {
 }
 
 /**
+ * Lee un archivo completo a memoria usando ÚNICAMENTE llamadas al sistema.
+ *
+ * El parcial prohíbe fopen/fread/fclose, así que aquí no se usa stdio ni
+ * siquiera para los archivos virtuales del kernel: open() consigue el
+ * descriptor, read() trae los bytes por bloques y una Cadena dinámica los
+ * acumula sin límite fijo (los archivos de /proc no reportan su tamaño real
+ * con fstat, así que hay que leer hasta que read() devuelva 0).
+ *
+ * Devuelve un buffer con malloc que el llamador libera, o NULL si falla.
+ */
+static char *leer_archivo_completo(const char *ruta) {
+    // --- CALL SYSTEM: open() ---
+    int fd = open(ruta, O_RDONLY);
+    if (fd == -1) {
+        perror("open (/proc)");
+        return NULL;
+    }
+
+    Cadena contenido;
+    cadena_iniciar(&contenido);
+
+    char bloque[4096];
+    ssize_t leidos;
+    // --- CALL SYSTEM: read() ---
+    while ((leidos = read(fd, bloque, sizeof bloque)) > 0) {
+        if (cadena_anexar(&contenido, bloque, (size_t)leidos) == -1) break;
+    }
+    if (leidos == -1) perror("read (/proc)");
+
+    // --- CALL SYSTEM: close() ---
+    if (close(fd) == -1) perror("close (/proc)");
+
+    return cadena_entregar(&contenido);
+}
+
+/**
+ * Recorre un buffer de texto entregando una línea por iteración.
+ * Reemplaza el salto por '\0' dentro del propio buffer (que es nuestro), así
+ * que no hace falta reservar memoria extra por línea.
+ *
+ * Uso:  char *sig = buffer;
+ *       char *linea;
+ *       while ((linea = siguiente_linea(&sig)) != NULL) { ... }
+ */
+static char *siguiente_linea(char **cursor) {
+    if (!cursor || !*cursor || **cursor == '\0') return NULL;
+    char *inicio = *cursor;
+    char *fin = strchr(inicio, '\n');
+    if (fin) {
+        *fin = '\0';
+        *cursor = fin + 1;
+    } else {
+        *cursor = inicio + strlen(inicio);
+    }
+    return inicio;
+}
+
+/**
  * Muestra un diagnóstico avanzado y educativo sobre la memoria del proceso.
- * 
- * Lee información crítica del sistema directamente desde los archivos virtuales 
- * del kernel de Linux (`/proc/self/status` y `/proc/self/maps`). Explica al usuario 
+ *
+ * Lee información crítica del sistema directamente desde los archivos virtuales
+ * del kernel de Linux (`/proc/self/status` y `/proc/self/maps`). Explica al usuario
  * los segmentos (HEAP, STACK, TEXT) y su estado actual de consumo.
  */
 static void comando_dibujar_memoria(void) {
@@ -115,16 +190,17 @@ static void comando_dibujar_memoria(void) {
         
     write(STDOUT_FILENO, encabezado, strlen(encabezado));
     
-    FILE *fp = fopen("/proc/self/status", "r");
-    if (!fp) {
+    char *contenido_status = leer_archivo_completo("/proc/self/status");
+    if (!contenido_status) {
         char *error = "\x1b[1;31mError al abrir /proc/self/status\x1b[0m\r\n";
         write(STDOUT_FILENO, error, strlen(error));
         return;
     }
-    
-    char linea[512];
+
     char out_buf[1024];
-    while (fgets(linea, sizeof(linea), fp)) {
+    char *cursor = contenido_status;
+    char *linea;
+    while ((linea = siguiente_linea(&cursor)) != NULL) {
         if (strncmp(linea, "VmPeak:", 7) == 0 ||
             strncmp(linea, "VmSize:", 7) == 0 ||
             strncmp(linea, "VmRSS:", 6) == 0 ||
@@ -132,7 +208,6 @@ static void comando_dibujar_memoria(void) {
             strncmp(linea, "VmStk:", 6) == 0 ||
             strncmp(linea, "VmExe:", 6) == 0) {
             
-            linea[strcspn(linea, "\n")] = '\0';
             char *colon = strchr(linea, ':');
             if (colon) {
                 *colon = '\0';
@@ -151,21 +226,23 @@ static void comando_dibujar_memoria(void) {
             }
         }
     }
-    fclose(fp);
-    
-    char *map_enc = 
+    free(contenido_status);
+
+    char *map_enc =
         "\r\n\x1b[1;36m==== MAPA DE SEGMENTOS VIRTUALES (/proc/self/maps) ====\x1b[0m\r\n"
         "\x1b[1;37mRango de Direcciones (Hex)          Permisos   Segmento        Concepto de S.O.\x1b[0m\r\n"
         "---------------------------------------------------------------------------------------\r\n";
     write(STDOUT_FILENO, map_enc, strlen(map_enc));
     
-    FILE *fpm = fopen("/proc/self/maps", "r");
-    if (fpm) {
+    char *contenido_maps = leer_archivo_completo("/proc/self/maps");
+    if (contenido_maps) {
         int line_count = 0;
-        while (fgets(linea, sizeof(linea), fpm) && line_count < 15) {
-            if (strstr(linea, "[heap]") || strstr(linea, "[stack]") || strstr(linea, "editor")) {
+        char *cursor_maps = contenido_maps;
+        char *linea_mapa;
+        while ((linea_mapa = siguiente_linea(&cursor_maps)) != NULL && line_count < 15) {
+            if (strstr(linea_mapa, "[heap]") || strstr(linea_mapa, "[stack]") || strstr(linea_mapa, "editor")) {
                 char addr[64]="", perms[16]="", offset[32]="", dev[16]="", inode[32]="", path[256]="";
-                int vars = sscanf(linea, "%63s %15s %31s %15s %31s %255s", addr, perms, offset, dev, inode, path);
+                int vars = sscanf(linea_mapa, "%63s %15s %31s %15s %31s %255s", addr, perms, offset, dev, inode, path);
                 
                 if (vars >= 6) {
                     char color_code[16] = "\x1b[37m"; 
@@ -193,7 +270,7 @@ static void comando_dibujar_memoria(void) {
                 }
             }
         }
-        fclose(fpm);
+        free(contenido_maps);
     }
 
     char *pie = "\r\n\x1b[1;33mPresiona 'Ctrl + P' para volver a la edicion...\x1b[0m\r\n";
@@ -246,27 +323,190 @@ static void comando_toggle_memoria(EstadoEditor *e) {
 }
 
 /**
- * Termina la ejecución del programa de forma segura.
- * Restaura el estilo de colores original de la terminal del usuario.
+ * Pide al bucle principal que termine.
+ *
+ * Antes esta función llamaba a exit(0) directamente, lo que dejaba sin
+ * ejecutar la liberación de memoria y el close() del descriptor. Ahora sólo
+ * levanta la bandera: main() sale del bucle y llama a editor_liberar(), que es
+ * lo que exige el enunciado del comando q ("sin dejar fugas de memoria").
  */
-static void comando_salir(void) {
+static void comando_salir(EstadoEditor *e) {
     // Restaurar tema original de la terminal del usuario antes de salir
     write(STDOUT_FILENO, TEMA_RESTAURAR, strlen(TEMA_RESTAURAR));
-    editor_pantalla_limpiar(); 
-    exit(0);
+    e->salir = 1;
 }
 
 /**
  * Ejecuta el proceso de guardado del documento en el disco duro.
- * Extrae los registros (syscall logs) generados por el almacén durante 
+ * Extrae los registros (syscall logs) generados por el almacén durante
  * el proceso y se los muestra al usuario.
  */
 static void comando_guardar(EstadoEditor *e) {
     char *log_syscall = malloc(65536);
+    if (!log_syscall) {
+        perror("malloc (log de guardado)");
+        return;
+    }
     log_syscall[0] = '\0';
-    estructura_guardar_archivo(e->estructura, e->nombreArchivo, log_syscall);
-    comando_mostrar_log_sistema("REPORTE DETALLADO (GUARDAR ARCHIVO)", log_syscall);
+
+    if (editor_guardar_en_disco(e, log_syscall) == -1)
+        comando_mostrar_log_sistema("ERROR AL GUARDAR", "No se pudo escribir el archivo.");
+    else
+        comando_mostrar_log_sistema("REPORTE DETALLADO (GUARDAR ARCHIVO)", log_syscall);
+
     free(log_syscall);
+}
+
+/* ============================================================================
+ * PUENTE ENTRE EL MODO VISUAL Y EL INTÉRPRETE DE COMANDOS
+ * ============================================================================
+ * El modo visual no reimplementa ningún comando: construye la misma cadena de
+ * texto que se escribiría en el modo CLI ("d 2", "i 4 hola") y se la entrega a
+ * cli_ejecutar_comando(). Hay una sola implementación de cada comando, y la
+ * pantalla completa es simplemente otra forma de escribirlos.
+ */
+
+/**
+ * Ejecuta una orden ya construida y muestra su resultado.
+ * PRECONDICIÓN: el modo raw debe estar desactivado (lo restaura el llamador).
+ */
+static void comando_procesar_orden(EstadoEditor *e, const char *orden) {
+    char *salida = NULL;
+    ResultadoCli resultado = cli_ejecutar_comando(&e->archivo, &e->portapapeles,
+                                                  orden, &salida);
+
+    if (resultado == CLI_SALIR) {
+        free(salida);
+        e->salir = 1;
+        return;
+    }
+
+    if (salida && salida[0] != '\0') {
+        printf("\n%s", salida);
+        printf("\n\x1b[1;33mPresione ENTER para volver al editor...\x1b[0m");
+        fflush(stdout);
+        getchar();
+    }
+    free(salida);
+
+    // El disco es la fuente de verdad: la vista se recarga desde él.
+    editor_recargar_desde_disco(e);
+}
+
+/**
+ * Prepara la pantalla para pedirle algo al usuario.
+ *
+ * Los comandos trabajan sobre los bytes del disco, así que lo que sólo vive
+ * en la lista enlazada (lo escrito a mano y aún sin guardar) se persiste
+ * primero; de lo contrario el comando operaría sobre texto viejo.
+ */
+static void comando_preparar_prompt(EstadoEditor *e, const char *titulo) {
+    if (e->modificado) editor_guardar_en_disco(e, NULL);
+    editor_pantalla_limpiar();
+    terminal_desactivar_modo_raw();
+    printf("\x1b[1;36m==== %s ====\x1b[0m\n\n", titulo);
+}
+
+/**
+ * Lee una línea del usuario en 'destino'. Devuelve 1 si leyó algo, 0 si hubo
+ * fin de entrada. La cadena vuelve sin el salto de línea final.
+ */
+static int comando_leer_entrada(char *destino, size_t tam) {
+    if (!fgets(destino, tam, stdin)) return 0;
+    size_t n = strlen(destino);
+    while (n > 0 && (destino[n - 1] == '\n' || destino[n - 1] == '\r'))
+        destino[--n] = '\0';
+    return 1;
+}
+
+/**
+ * Atajo de un comando SIN argumentos (m).
+ */
+static void atajo_directo(EstadoEditor *e, const char *titulo, const char *orden) {
+    comando_preparar_prompt(e, titulo);
+    comando_procesar_orden(e, orden);
+    terminal_activar_modo_raw();
+}
+
+/**
+ * Atajo de un comando CON un argumento (o, p, a, d, s, y, x).
+ *
+ * Es la generalización del prompt que ya usaba Ctrl+F: se pide el argumento
+ * por pantalla y se arma la orden. Si 'defecto' no es NULL, pulsar ENTER en
+ * vacío lo acepta, de modo que Ctrl+D + ENTER borra la línea del cursor.
+ */
+static void atajo_con_argumento(EstadoEditor *e, const char *titulo,
+                                const char *verbo, const char *etiqueta,
+                                const char *defecto) {
+    comando_preparar_prompt(e, titulo);
+
+    printf("%s", etiqueta);
+    if (defecto) printf(" [\x1b[1;33m%s\x1b[0m]", defecto);
+    printf(": ");
+    fflush(stdout);
+
+    char entrada[4096];
+    if (comando_leer_entrada(entrada, sizeof entrada)) {
+        const char *argumento = (entrada[0] == '\0' && defecto) ? defecto : entrada;
+
+        Cadena orden;
+        cadena_iniciar(&orden);
+        cadena_printf(&orden, "%s %s", verbo, argumento);
+        if (orden.datos) comando_procesar_orden(e, orden.datos);
+        cadena_liberar(&orden);
+    }
+    terminal_activar_modo_raw();
+}
+
+/**
+ * Atajo del comando i, el único que necesita DOS argumentos: pide primero la
+ * línea (con la del cursor por defecto) y después el texto.
+ */
+static void atajo_insertar(EstadoEditor *e) {
+    char defecto[16];
+    snprintf(defecto, sizeof defecto, "%d", e->cursorY + 1);
+
+    comando_preparar_prompt(e, "INSERTAR LÍNEA (comando i)");
+
+    printf("Insertar en la línea [\x1b[1;33m%s\x1b[0m]: ", defecto);
+    fflush(stdout);
+
+    char numero[64];
+    if (comando_leer_entrada(numero, sizeof numero)) {
+        const char *linea_destino = (numero[0] == '\0') ? defecto : numero;
+
+        printf("Texto: ");
+        fflush(stdout);
+
+        char texto[4096];
+        if (comando_leer_entrada(texto, sizeof texto)) {
+            Cadena orden;
+            cadena_iniciar(&orden);
+            cadena_printf(&orden, "i %s %s", linea_destino, texto);
+            if (orden.datos) comando_procesar_orden(e, orden.datos);
+            cadena_liberar(&orden);
+        }
+    }
+    terminal_activar_modo_raw();
+}
+
+/**
+ * Abre la LÍNEA DE COMANDOS libre (el prompt ':' al estilo de vi).
+ *
+ * Sirve para escribir cualquier comando completo, incluidos los que no tienen
+ * atajo propio (yl, yc, h) y los que se quieran dirigir a una línea distinta
+ * de la del cursor.
+ */
+static void comando_linea_comandos(EstadoEditor *e) {
+    comando_preparar_prompt(e, "LÍNEA DE COMANDOS");
+    printf("(h = ayuda, ENTER vacío = volver al editor)\n\n:");
+    fflush(stdout);
+
+    char linea[4096];
+    if (comando_leer_entrada(linea, sizeof linea))
+        comando_procesar_orden(e, linea);
+
+    terminal_activar_modo_raw();
 }
 
 /**
@@ -275,20 +515,27 @@ static void comando_guardar(EstadoEditor *e) {
  * reposiciona el cursor exactamente sobre ella.
  */
 static void comando_buscar(EstadoEditor *e) {
-    editor_pantalla_limpiar();
-    terminal_desactivar_modo_raw();
-    printf("Buscar palabra: "); fflush(stdout);
-    char termino[128];
-    if (fgets(termino, sizeof(termino), stdin) != NULL) {
-        size_t len = strlen(termino);
-        if (len > 0 && termino[len-1] == '\n') termino[len-1] = '\0';
+    comando_preparar_prompt(e, "BUSCAR PALABRA (comando s)");
+    printf("Buscar palabra: ");
+    fflush(stdout);
+
+    char termino[256];
+    if (comando_leer_entrada(termino, sizeof termino) && termino[0] != '\0') {
+        // 1. El comando 's' lista todas las coincidencias con línea y columna.
+        Cadena orden;
+        cadena_iniciar(&orden);
+        cadena_printf(&orden, "s %s", termino);
+        if (orden.datos) comando_procesar_orden(e, orden.datos);
+        cadena_liberar(&orden);
+
+        // 2. Además, y esto es propio del modo visual, llevamos el cursor
+        //    hasta la primera coincidencia para poder seguir editando ahí.
         NodoLinea *encontrada = NULL;
         int posX = 0, posY = 0;
         if (estructura_buscar_palabra(e->estructura, termino, &encontrada, &posX, &posY)) {
-            e->lineaActual = encontrada; e->cursorX = posX; e->cursorY = posY;
-        } else {
-            printf("\nLa palabra '%s' no se encuentra.\nPresione ENTER para continuar...", termino);
-            fflush(stdout); getchar(); 
+            e->lineaActual = encontrada;
+            e->cursorX = posX;
+            e->cursorY = posY;
         }
     }
     terminal_activar_modo_raw();
@@ -320,11 +567,53 @@ int comando_manejar_teclado(char c, EstadoEditor *e) {
         return 1;
     }
     
-    // 2. Manejo de comandos de edición (Solo operan sobre el documento)
+    // 2. Cada comando del enunciado tiene su atajo. Los que llevan argumentos
+    //    los piden por pantalla; los de número de línea traen como valor por
+    //    defecto la línea donde está el cursor, de modo que pulsar ENTER en
+    //    vacío actúa sobre "esta línea".
+    char linea_cursor[16];
+    snprintf(linea_cursor, sizeof linea_cursor, "%d", e->cursorY + 1);
+
     switch (c) {
-        case TECLA_CTRL('q'): comando_salir();       return 1;
-        case TECLA_CTRL('s'): comando_guardar(e);    return 1;
-        case TECLA_CTRL('f'): comando_buscar(e);     return 1;
+        // Atajos propios del entorno visual
+        case TECLA_CTRL('q'): comando_salir(e);           return 1;  // comando q
+        case TECLA_CTRL('s'): comando_guardar(e);         return 1;
+        case TECLA_CTRL('l'): comando_linea_comandos(e);  return 1;
+
+        // Comandos del enunciado
+        case TECLA_CTRL('o'):
+            atajo_con_argumento(e, "ABRIR ARCHIVO (comando o)",
+                                "o", "Ruta del archivo", NULL);
+            return 1;
+        case TECLA_CTRL('v'):
+            atajo_con_argumento(e, "VER LÍNEA (comando p)",
+                                "p", "Número de línea", linea_cursor);
+            return 1;
+        case TECLA_CTRL('a'):
+            atajo_con_argumento(e, "AÑADIR LÍNEA AL FINAL (comando a)",
+                                "a", "Texto", NULL);
+            return 1;
+        case TECLA_CTRL('d'):
+            atajo_con_argumento(e, "BORRAR LÍNEA (comando d)",
+                                "d", "Número de línea", linea_cursor);
+            return 1;
+        case TECLA_CTRL('n'):
+            atajo_insertar(e);                                       // comando i
+            return 1;
+        case TECLA_CTRL('f'):
+            comando_buscar(e);                                       // comando s
+            return 1;
+        case TECLA_CTRL('g'):
+            atajo_directo(e, "METADATOS DEL ARCHIVO (comando m)", "m");
+            return 1;
+        case TECLA_CTRL('y'):
+            atajo_con_argumento(e, "COPIAR LÍNEA (comando y)",
+                                "y", "Número de línea", linea_cursor);
+            return 1;
+        case TECLA_CTRL('u'):
+            atajo_con_argumento(e, "PEGAR PORTAPAPELES (comando x)",
+                                "x", "Insertar en la línea", linea_cursor);
+            return 1;
     }
     
     // Retornamos 0 si el carácter ingresado no es un comando registrado

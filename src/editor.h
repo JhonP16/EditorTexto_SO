@@ -2,6 +2,8 @@
 #define EDITOR_H
 
 #include "estructura.h"
+#include "archivo.h"
+#include "portapapeles.h"
 
 // ============================================================================
 // PERSONALIZACIÓN DE LA TERMINAL (TEMA VISUAL)
@@ -17,12 +19,22 @@
 /**
  * Módulo: Editor
  * Propósito: Manejar la Lógica de Negocio y la Interfaz de Usuario (UI).
- * 
+ *
  * Contiene el estado global de la sesión de edición y las funciones para
  * renderizar caracteres y procesar atajos de teclado.
+ *
+ * Conviven dos representaciones del documento, con roles distintos:
+ *   - 'estructura': la lista doblemente enlazada que se dibuja y se escribe
+ *     con el teclado. Es la VISTA en memoria.
+ *   - 'archivo': el descriptor abierto sobre el que operan los comandos ':'
+ *     mediante llamadas al sistema. Es la FUENTE DE VERDAD en disco.
+ * Tras cada comando ':' la vista se recarga desde el disco para que ambas
+ * nunca queden desincronizadas.
  */
 typedef struct {
-    EstructuraTexto *estructura;    // Estructura de datos (Modelo)
+    EstructuraTexto *estructura;    // Estructura de datos (Modelo en RAM)
+    Archivo archivo;                // Descriptor + índice de líneas (Modelo en disco)
+    Portapapeles portapapeles;      // Portapapeles secuencial de los comandos y/x
     int cursorX;              // Posición lógica del cursor (Columnas)
     int cursorY;              // Posición lógica del cursor (Filas)
     int filasPantalla;        // Límite visual de la ventana
@@ -30,9 +42,11 @@ typedef struct {
     NodoLinea *lineaActual;   // Referencia rápida al nodo donde estamos escribiendo
     char *nombreArchivo;      // Ruta del archivo abierto
     int mostrarAyuda;         // Bandera booleana de UI
-    int mostrarEstructura;
-    int mostrarMemoria;       // Bandera booleana de UI para monitoreo de RAM    // Bandera booleana de UI para debug
+    int mostrarEstructura;    // Bandera booleana de UI para debug
+    int mostrarMemoria;       // Bandera booleana de UI para monitoreo de RAM
     int desplazamientoFila;   // Desplazamiento (Scroll) vertical
+    int modificado;           // 1 si hay cambios escritos a mano sin guardar
+    int salir;                // 1 cuando el usuario pide salir (Ctrl+Q o :q)
 } EstadoEditor;
 
 // Funciones del ciclo de vida y renderizado
@@ -46,5 +60,18 @@ void editor_pantalla_limpiar(void);
 
 // Muestra una pantalla de bienvenida al arrancar
 void editor_pantalla_bienvenida(EstadoEditor *e);
+
+/**
+ * Vuelve a cargar la lista enlazada desde el archivo en disco y reubica el
+ * cursor. Se llama después de cada comando ':' que modifica bytes, porque en
+ * ese momento el disco quedó por delante de la vista en memoria.
+ */
+void editor_recargar_desde_disco(EstadoEditor *e);
+
+/**
+ * Vuelca la lista enlazada al disco (lo que hace Ctrl+S) y reindexa el
+ * descriptor. Devuelve 0 si todo salió bien.
+ */
+int editor_guardar_en_disco(EstadoEditor *e, char *log_opcional);
 
 #endif

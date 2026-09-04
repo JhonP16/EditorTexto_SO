@@ -1,187 +1,245 @@
 # Diseño Arquitectónico del Editor de Texto CLI
 
-Este documento describe la arquitectura, la estructura de datos subyacente y el uso de llamadas al sistema (System Calls) para el funcionamiento del editor de texto modular en C.
+Este documento describe la arquitectura, las estructuras de datos y el uso de llamadas al sistema (System Calls) que sostienen el editor.
 
 ## 1. Arquitectura Modular
 
-El proyecto está dividido en tres módulos principales para garantizar la mantenibilidad y escalabilidad del código.
+El proyecto se reparte en ocho módulos agrupados en tres capas.
 
 ```mermaid
 graph TD
-    subgraph "Módulos del Editor (C Space)"
-        Main[main.c<br/>Bucle de ejecución]
-        Editor[editor.c / editor.h<br/>UI, Teclado y Control]
-        Buffer[buffer.c / buffer.h<br/>Gestión de Memoria y Texto]
+    subgraph "Interfaz"
+        Main[main.c<br/>-c o isatty:<br/>elige interfaz]
+        Editor[editor.c<br/>UI visual y cursor]
+        Comando[comando.c<br/>atajos Ctrl y modales]
+        Cli[cli.c<br/>interprete de comandos]
     end
-  
+
+    subgraph "Datos"
+        Estructura[estructura.c<br/>lista enlazada del documento]
+        Porta[portapapeles.c<br/>lista de lineas copiadas]
+        Cadena[cadena.c<br/>buffers dinamicos]
+    end
+
+    subgraph "Sistema"
+        Archivo[archivo.c<br/>capa de disco]
+        Terminal[terminal.c<br/>modo raw del TTY]
+    end
+
     subgraph "Kernel Space (Linux)"
         Syscalls((System Calls<br/>POSIX))
-        Terminal((Emulador de<br/>Terminal))
+        Tty((Emulador de<br/>Terminal))
     end
 
-    Main -->|1. Llama a Inicializar| Editor
-    Main -->|2. Refresca Pantalla| Editor
-    Main -->|3. Procesa Teclas| Editor
-  
-    Editor -->|Modifica texto| Buffer
-    Editor <-->|read / write / ioctl| Syscalls
-    Syscalls <--> Terminal
+    Main --> Editor
+    Main --> Cli
+    Editor --> Comando
+    Comando --> Cli
+    Cli --> Archivo
+    Cli --> Porta
+    Editor --> Estructura
+    Archivo --> Cadena
+    Estructura --> Cadena
+    Archivo <--> Syscalls
+    Terminal <--> Syscalls
+    Syscalls <--> Tty
 ```
 
-* **`main.c`**: Es el punto de entrada del programa. Maneja la inicialización del editor y mantiene el ciclo de vida principal (el "Game Loop"), que consiste en refrescar constantemente la pantalla y capturar las entradas del teclado de forma infinita hasta que el usuario decida salir.
-* **`estructura.c` / `estructura.h`**: Contiene toda la lógica relacionada con el manejo de la memoria y la manipulación del texto. Aquí es donde se define y controla la estructura de datos.
-* **`editor.c` / `editor.h`**: Contiene toda la lógica de interfaz de usuario, control del cursor, menús de ayuda, procesamiento de teclas especiales y la interacción directa con la terminal del sistema operativo a bajo nivel.
+* **`main.c`**: punto de entrada. La bandera `-c`/`--cli` fuerza el intérprete de línea; si no se pasa, consulta `isatty(STDIN_FILENO)` para decidir si arranca el editor visual (hay un teclado) o el intérprete por entrada estándar (hay una tubería).
+* **`archivo.c` / `archivo.h`**: la capa de disco. Todas las llamadas al sistema que manipulan bytes del archivo viven aquí.
+* **`cli.c` / `cli.h`**: el despachador de comandos, compartido por las dos interfaces.
+* **`estructura.c` / `estructura.h`**: la lista doblemente enlazada que representa el documento en RAM.
+* **`portapapeles.c`**, **`cadena.c`**: estructuras dinámicas auxiliares.
+* **`editor.c` / `editor.h`**: interfaz visual, control del cursor y renderizado.
+* **`comando.c` / `comando.h`**: atajos `Ctrl` y pantallas modales de diagnóstico.
+* **`terminal.c` / `terminal.h`**: interacción a bajo nivel con el TTY.
 
 ---
 
-## 2. Estructura de Datos (El Buffer de Texto)
+## 2. Flujo de un comando
 
-Para almacenar el texto, el editor utiliza una **Lista Doblemente Enlazada** de líneas.
-
-```mermaid
-graph LR
-    TB[BufferTexto]
-  
-    subgraph "Lista Doblemente Enlazada"
-        L1[Línea 1<br/>NodoLinea]
-        L2[Línea 2<br/>NodoLinea]
-        L3[Línea 3<br/>NodoLinea]
-    
-        L1 <-->|siguiente / anterior| L2
-        L2 <-->|siguiente / anterior| L3
-    end
-  
-    TB -->|cabeza| L1
-    TB -->|cola| L3
-```
-
-### Anatomía de un `NodoLinea` (Nodo de Línea)
-
-Cada nodo representa una única fila de texto en el editor y gestiona su propia memoria interna. Así es como se define en C:
-
-```c
-// Estructura para representar una línea de texto individual.
-typedef struct NodoLinea {
-    char *datos;             // Puntero a los caracteres reales en memoria
-    size_t longitud;         // Cantidad actual de caracteres escritos
-    size_t capacidad;        // Capacidad de memoria dinámica reservada
-    struct NodoLinea *anterior;  // Puntero a la línea de arriba
-    struct NodoLinea *siguiente;  // Puntero a la línea de abajo
-} NodoLinea;
-
-typedef struct {
-    NodoLinea *cabeza;       // Referencia directa al inicio del texto
-    NodoLinea *cola;         // Referencia directa al final del texto
-    int totalLineas;         // Contador de número de líneas
-} BufferTexto;
-```
-
-### ¿Por qué `longitud` vs `capacidad`?
-
-Si escribes 5 letras, `longitud` es 5. Sin embargo, mediante la lógica dinámica, a ese nodo se le pre-asignan más bytes (ej: `capacidad` = 32). Esto evita tener que llamar a la lenta función del sistema operativo `malloc` cada vez que presionas una tecla:
-
-```c
-void linea_insertar_caracter(NodoLinea *linea, size_t pos, char c) {
-    // Si la longitud supera la capacidad pre-asignada, duplicamos la capacidad
-    if (linea->longitud + 1 >= linea->capacidad) {
-        linea->capacidad *= 2;
-        linea->datos = (char*)realloc(linea->datos, linea->capacidad); // Syscall para expandir memoria
-    }
-
-    // Movemos el resto de letras a la derecha con un solo comando de memoria
-    memmove(&linea->datos[pos + 1], &linea->datos[pos], linea->longitud - pos + 1);
-    linea->datos[pos] = c;
-    linea->longitud++;
-}
-```
-
----
-
-## 3. Interacción con el Sistema Operativo (System Calls)
-
-Un editor en línea de comandos (CLI) no depende de funciones estándar como `printf` o `scanf`, ya que estas esperan a que el usuario presione "Enter". Para lograr reacción instantánea (como en un videojuego), usamos directamente **Llamadas al Sistema POSIX**.
+Éste es el recorrido completo de `d 2` escrito en la línea de comandos del modo visual:
 
 ```mermaid
 sequenceDiagram
     participant Usuario
-    participant Editor (editor.c)
-    participant SO (Kernel Linux)
-    participant Buffer (buffer.c)
-  
-    Note over Editor, SO: 1. Entrar a Raw Mode
-    Editor->{SO}: tcgetattr() / tcsetattr()
-  
-    Note over Editor, SO: 2. Bucle Principal
-    Usuario->>SO: Presiona una tecla ('A')
-    SO->>Editor: read() captura el byte 'A'
-    Editor->>Buffer: linea_insertar_caracter('A')
-  
-    Editor->>SO: write() limpia pantalla (ANSI Escape)
-    Editor->>SO: write() imprime nuevo buffer
-    SO->>Usuario: Terminal se actualiza visualmente
+    participant Comando as comando.c
+    participant Cli as cli.c
+    participant Archivo as archivo.c
+    participant SO as Kernel Linux
+    participant Estructura as estructura.c
+
+    Usuario->>Comando: Ctrl+D (o Ctrl+L y "d 2")
+    Note over Comando: si hay cambios sin guardar,<br/>se persisten primero
+    Comando->>Cli: cli_ejecutar_comando("d 2")
+    Cli->>Archivo: archivo_borrar_linea(a, 2)
+    Archivo->>SO: read() de la cola a un buffer malloc
+    Archivo->>SO: lseek() al inicio de la linea 2
+    Archivo->>SO: write() de la cola desplazada
+    Archivo->>SO: ftruncate() al nuevo tamano
+    Archivo->>SO: read() para reconstruir el indice
+    Cli-->>Comando: resultado + texto de salida
+    Comando->>Estructura: recargar la vista desde disco
+    Comando->>Usuario: pantalla actualizada
 ```
 
-### A. Terminal en "Raw Mode" (Modo Crudo)
+La misma llamada a `cli_ejecutar_comando()` la hace `cli_repl()` cuando los comandos llegan por una tubería. Una sola implementación, dos formas de invocarla.
 
-Al manipular la estructura `termios` utilizando llamadas, se configuran banderas a bajo nivel:
+---
 
-* `ECHO`: Se apaga para que las letras no se impriman automáticamente.
-* `ICANON`: Se apaga para leer byte por byte.
+## 3. Estructuras de Datos
+
+### 3.1 El documento en RAM: lista doblemente enlazada
+
+Cada nodo representa una fila de texto, y cada fila contiene a su vez una lista de palabras. Así se define en `src/estructura.h`:
 
 ```c
-void editor_activar_modo_raw() {
-    tcgetattr(STDIN_FILENO, &termios_original); // Obtener estado actual del SO
-  
-    struct termios raw = termios_original;
-    // Apagar banderas (bitwise NOT)
-    raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG); 
-    raw.c_cc[VMIN] = 0;  // No bloquear esperando caracteres
-    raw.c_cc[VTIME] = 1; // Timeout de 1/10 de segundo
+// Una palabra (o un bloque de espacios) dentro de una linea.
+typedef struct NodoPalabra {
+    char *texto;
+    size_t longitud;
+    size_t capacidad;
+    struct NodoPalabra *anterior;
+    struct NodoPalabra *siguiente;
+} NodoPalabra;
 
-    // Aplicar los cambios al sistema
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw); 
+// Una linea del documento: nodo de la lista doblemente enlazada.
+typedef struct NodoLinea {
+    NodoPalabra *palabras_cabeza;
+    NodoPalabra *palabras_cola;
+    size_t longitud;              // caracteres totales de la linea
+    struct NodoLinea *anterior;
+    struct NodoLinea *siguiente;
+} NodoLinea;
+
+// El documento completo.
+typedef struct {
+    NodoLinea *cabeza;
+    NodoLinea *cola;
+    int totalLineas;
+} EstructuraTexto;
+```
+
+```mermaid
+graph LR
+    TB[EstructuraTexto]
+
+    subgraph "Lista Doblemente Enlazada"
+        L1[Línea 1<br/>NodoLinea]
+        L2[Línea 2<br/>NodoLinea]
+        L3[Línea 3<br/>NodoLinea]
+
+        L1 <-->|siguiente / anterior| L2
+        L2 <-->|siguiente / anterior| L3
+    end
+
+    TB -->|cabeza| L1
+    TB -->|cola| L3
+```
+
+### 3.2 El archivo en disco: índice de offsets
+
+`archivo.c` no guarda el texto, guarda **dónde está**: dos arreglos dinámicos con el inicio y el largo de cada línea, reconstruidos tras cada mutación.
+
+```c
+off_t  *inicio;   // offset absoluto donde empieza cada linea
+size_t *largo;    // largo de cada linea, sin contar el '\n'
+```
+
+Con eso, `p 7` es un `lseek` directo al byte de la línea 7 en vez de un recorrido desde el principio del archivo.
+
+### 3.3 Buffers dinámicos: `longitud` vs `capacidad`
+
+Tanto `NodoPalabra` como `Cadena` distinguen entre lo que ocupan y lo que tienen reservado. Si escribes 5 letras, `longitud` es 5, pero puede haber 32 bytes ya pedidos al sistema. Eso evita llamar a `realloc` en cada pulsación:
+
+```c
+int cadena_reservar(Cadena *c, size_t bytes_extra) {
+    size_t necesaria = c->longitud + bytes_extra + 1;
+    if (necesaria <= c->capacidad) return 0;      // ya cabe: no se pide nada
+
+    size_t nueva = c->capacidad ? c->capacidad : 128;
+    while (nueva < necesaria) nueva *= 2;         // duplicar hasta que alcance
+
+    char *bloque = realloc(c->datos, nueva);
+    if (!bloque) { perror("realloc"); return -1; }
+    c->datos = bloque;
+    c->capacidad = nueva;
+    return 0;
 }
 ```
 
-### B. Uso Directo de System Calls (`read` y `write`)
+Duplicar la capacidad hace que el coste de `n` inserciones sea O(n) amortizado, no O(n²).
 
-El teclado no devuelve cadenas (Strings), devuelve eventos de bytes en el `STDIN_FILENO`. Así capturamos la tecla presionada:
+---
+
+## 4. Interacción con el Sistema Operativo (System Calls)
+
+### A. Manipulación del archivo
+
+Toda la edición ocurre sobre el descriptor abierto, sin `fopen` ni `fwrite`. Ejemplo real, el borrado de una línea:
 
 ```c
-void editor_procesar_tecla(EstadoEditor *e) {
-    char c = '\0';
-    // Syscall para leer 1 byte. Falla o retorna -1 si no hubo pulsación en el timeout
-    if (read(STDIN_FILENO, &c, 1) == -1) return;
+// 1. Guardar la cola posterior en un buffer dinamico
+char *cola = leer_cola(a, fin_linea, &cola_largo);      // lseek + read
 
-    if (c == TECLA_CTRL('s')) { 
-        // Lógica de guardado...
-    } else if (c >= 32 && c <= 126) {
-        // Enviar carácter directamente al sistema de buffers de C
-        linea_insertar_caracter(e->lineaActual, e->cursorX, c);
-        e->cursorX++;
+// 2. Reescribirla desplazada sobre la linea borrada
+lseek(a->fd, inicio_linea, SEEK_SET);
+escribir_todo(a->fd, cola, cola_largo);                 // write
+
+// 3. Recortar los bytes que sobran al final
+ftruncate(a->fd, a->tamano - (off_t)bytes_borrados);
+```
+
+El mapa completo de comando → llamada al sistema está en [SYSCALLS.md](SYSCALLS.md).
+
+### B. Terminal en "Raw Mode" (Modo Crudo)
+
+Un editor a pantalla completa no puede esperar a que el usuario pulse Enter. Manipulando la estructura `termios` se configuran banderas a bajo nivel:
+
+```c
+void terminal_activar_modo_raw() {
+    if (tcgetattr(STDIN_FILENO, &termios_original) == -1) {
+        perror("tcgetattr (la entrada estándar no es una terminal)");
+        return;
     }
+    atexit(terminal_desactivar_modo_raw);
+
+    struct termios raw = termios_original;
+    raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);  // apagar banderas
+    raw.c_cc[VMIN] = 1;   // read() se bloquea hasta recibir 1 byte
+    raw.c_cc[VTIME] = 0;  // sin limite de tiempo
+
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1)
+        perror("tcsetattr (activar modo raw)");
 }
 ```
+
+* `ECHO`: se apaga para que las letras no se impriman automáticamente.
+* `ICANON`: se apaga para leer byte por byte.
+* `ISIG`: se apaga para que `Ctrl+C` llegue al programa en vez de matarlo.
 
 ### C. Secuencias de Escape ANSI (VT100)
 
-Para mover el cursor por la pantalla, el editor envía códigos especiales mediante el System Call `write()` que son procesados por el hardware/emulador gráfico de la terminal:
+Para mover el cursor se envían códigos especiales por `write()`, que interpreta el emulador de terminal:
 
 ```c
 void editor_refrescar_pantalla(EstadoEditor *e) {
-    // Escape secuence: \x1b[2J -> Pide al sistema que borre la pantalla
-    write(STDOUT_FILENO, "\x1b[2J", 4);
-  
-    // \x1b[H -> Mueve el cursor a las coordenadas X=1, Y=1
-    write(STDOUT_FILENO, "\x1b[H", 3);
+    write(STDOUT_FILENO, "\x1b[2J", 4);   // borrar la pantalla
+    write(STDOUT_FILENO, "\x1b[H", 3);    // cursor a la posicion 1,1
 
-    editor_dibujar_filas(e); // Pintar todo nuestro buffer de texto
-  
-    // Mover el cursor dinámicamente según nuestra posición interna (cursorY, cursorX)
+    editor_dibujar_filas(e);
+
     char buf[32];
-    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (e->cursorY - e->desplazamientoFila) + 1, e->cursorX + 1);
-    write(STDOUT_FILENO, buf, strlen(buf)); // Inyectar orden directamente a pantalla
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH",
+             (e->cursorY - e->desplazamientoFila) + 1, e->cursorX + 1);
+    write(STDOUT_FILENO, buf, strlen(buf));
 }
 ```
 
-Como se aprecia en el código, el sistema no distingue entre texto visible u órdenes ocultas; ambos se envían mediante la misma vía directa de `STDOUT_FILENO`.
+El sistema no distingue entre texto visible y órdenes de control: ambos viajan por la misma vía hacia `STDOUT_FILENO`.
+
+---
+
+## 5. Verificación de errores
+
+Cada llamada al sistema comprueba su retorno y reporta con `perror()` añadiendo el contexto entre paréntesis. `read()` y `write()` pasan además por los envoltorios `leer_todo()` y `escribir_todo()`, que reintentan ante operaciones parciales o interrupciones por señal (`EINTR`): suponer que un `write()` de N bytes escribe siempre N bytes es un error clásico.
