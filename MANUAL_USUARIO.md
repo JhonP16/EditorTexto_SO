@@ -144,9 +144,30 @@ Pantallas que se superponen al texto. Para salir de ellas, **vuelve a presionar 
 
 ---
 
-## 6. Pruebas
+## 6. Lanzarlo desde el shell de la asignatura
 
-El proyecto trae un banco de pruebas automático con 52 escenarios: cada comando, cada caso borde y los atajos del modo visual (que se ejercitan enviando pulsaciones reales a un pseudo-terminal).
+El editor se integra al shell de clase en la categoría `aplicaciones`:
+
+```bash
+make                # 1. compilar el editor (desde la raiz del proyecto)
+cd shell && make    # 2. compilar el shell; su Makefile lo arranca enseguida
+```
+
+Ya dentro del shell:
+
+```
+eafitOS> editor notas.txt                     # editor visual
+eafitOS> editor -c notas.txt                  # interprete de linea del editor
+eafitOS> editor_cmd notas.txt "a hola; p; m"  # ordenes por tuberia, sin interaccion
+```
+
+El detalle de la integracion esta en [INTEGRACION_SHELL.md](INTEGRACION_SHELL.md).
+
+---
+
+## 7. Pruebas
+
+El proyecto trae un banco de pruebas automático con 68 escenarios: cada comando, cada caso borde y los atajos del modo visual (que se ejercitan enviando pulsaciones reales a un pseudo-terminal).
 
 ```bash
 make test                    # o bien:  bash pruebas.sh

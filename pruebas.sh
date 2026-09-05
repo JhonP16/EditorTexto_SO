@@ -349,6 +349,107 @@ tres"
 fi
 
 # ---------------------------------------------------------------------------
+titulo "INTEGRACION CON EL SHELL DE CLASE (categoria 'aplicaciones')"
+# ---------------------------------------------------------------------------
+
+DIR_SHELL="$(cd "$(dirname "$0")" && pwd)/shell"
+
+if [ ! -d "$DIR_SHELL" ]; then
+    echo -e "  ${GRIS}omitidas: no existe el directorio shell/${FIN}"
+elif ! command -v make > /dev/null 2>&1; then
+    echo -e "  ${GRIS}omitidas: falta 'make' para compilar el shell${FIN}"
+else
+    make -C "$DIR_SHELL" compilar > /dev/null 2>&1
+    SHELL_BIN="$DIR_SHELL/eafitOS"
+
+    TOTAL=$((TOTAL + 1))
+    if [ -x "$SHELL_BIN" ]; then
+        echo -e "  ${VERDE}OK${FIN}    el shell compila con la categoria nueva"
+    else
+        FALLOS=$((FALLOS + 1))
+        echo -e "  ${ROJO}FALLO${FIN} el shell no compilo"
+    fi
+
+    if [ -x "$SHELL_BIN" ]; then
+        # correr_shell <comandos del shell>
+        correr_shell() { (cd "$DIR_SHELL" && printf '%b' "$1" | ./eafitOS 2>&1); }
+
+        salida=$(correr_shell 'help\nexit\n')
+        verificar_contiene "'help' anuncia la categoria aplicaciones" "aplicaciones" "$salida"
+
+        salida=$(correr_shell 'help aplicaciones\nexit\n')
+        verificar_contiene "'help aplicaciones' lista el comando editor"     "editor " "$salida"
+        verificar_contiene "'help aplicaciones' lista el comando editor_cmd" "editor_cmd" "$salida"
+
+        salida=$(correr_shell 'help editor\nexit\n')
+        verificar_contiene "'help editor' detalla sus syscalls" "execv(2)" "$salida"
+
+        # El shell localiza el editor con access() sin ayuda del usuario
+        salida=$(correr_shell 'editor_cmd /dev/null "h"\nexit\n')
+        verificar_contiene "el shell localiza el editor con access()" "access" "$salida"
+
+        # editor_cmd modifica de verdad los bytes del archivo
+        printf 'uno\ndos\ntres\n' > "$TRABAJO/desde_shell.txt"
+        correr_shell "editor_cmd $TRABAJO/desde_shell.txt \"a cuarta; d 2\"\nexit\n" > /dev/null
+        verificar_archivo "editor_cmd ejecuta las ordenes sobre el archivo" \
+            "$TRABAJO/desde_shell.txt" \
+"uno
+tres
+cuarta"
+
+        # La tuberia demuestra pipe/dup2 y el editor termina solo con el EOF
+        salida=$(correr_shell "editor_cmd $TRABAJO/desde_shell.txt \"p\"\nexit\n")
+        verificar_contiene "editor_cmd traza pipe(2)"    "pipe" "$salida"
+        verificar_contiene "editor_cmd traza dup2 vía la tuberia" "tuberia\[0\]" "$salida"
+        verificar_contiene "el editor termina solo al cerrar la tuberia" "terminó correctamente" "$salida"
+
+        # El shell reenvia al editor las banderas tal cual, sin interpretarlas
+        salida=$(correr_shell 'editor --help\nexit\n')
+        verificar_contiene "'editor' reenvia --help al editor" "\-c, --cli" "$salida"
+
+        salida=$(correr_shell 'editor -z\nexit\n')
+        verificar_contiene "una bandera invalida llega al editor y este la rechaza" \
+            "terminó con código" "$salida"
+
+        # 'editor -c' abre el interprete de linea DENTRO del shell.
+        # Necesita un pseudo-terminal: con una tuberia el editor y el shell
+        # competirian por la misma entrada estandar.
+        if command -v script > /dev/null 2>&1 && [ -z "$SIN_VISUAL" ]; then
+            printf 'uno\ndos\ntres\n' > "$TRABAJO/desde_shell_cli.txt"
+            (cd "$DIR_SHELL" && {
+                sleep 1; printf "editor -c $TRABAJO/desde_shell_cli.txt\n"
+                sleep 2; printf 'd 2\n'
+                sleep 1; printf 'q\n'
+                sleep 1; printf 'exit\n'
+                sleep 1
+             } | timeout 60 script -qec './eafitOS' /dev/null > /dev/null 2>&1)
+            verificar_archivo "'editor -c' abre el interprete de linea desde el shell" \
+                "$TRABAJO/desde_shell_cli.txt" \
+"uno
+tres"
+        else
+            echo -e "  ${GRIS}omitida: 'editor -c' interactivo (requiere 'script')${FIN}"
+        fi
+
+        # Uso incorrecto
+        salida=$(correr_shell 'editor_cmd\nexit\n')
+        verificar_contiene "editor_cmd sin argumentos muestra su uso" "Uso: editor_cmd" "$salida"
+
+        # EDITOR_SO tiene prioridad sobre las rutas por defecto
+        printf 'x\ny\n' > "$TRABAJO/con_var.txt"
+        (cd "$TRABAJO" && printf "editor_cmd $TRABAJO/con_var.txt \"d 1\"\nexit\n" | \
+            EDITOR_SO="$EDITOR" "$SHELL_BIN" > /dev/null 2>&1)
+        verificar_archivo "EDITOR_SO permite indicar la ruta del editor" \
+            "$TRABAJO/con_var.txt" "y"
+
+        # Sin editor a la vista, el error es claro y no revienta
+        salida=$(cd "$TRABAJO" && printf 'editor_cmd x.txt "p"\nexit\n' | "$SHELL_BIN" 2>&1)
+        verificar_contiene "sin binario del editor el shell avisa con claridad" \
+            "No se encontró el binario del editor" "$salida"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 titulo "SESION COMPLETA (el guion de la demostracion)"
 # ---------------------------------------------------------------------------
 

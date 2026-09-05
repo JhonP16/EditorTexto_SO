@@ -170,8 +170,21 @@ Las teclas combinadas con Control se interceptan con una máscara de bits: `#def
 
 ---
 
-## 8. Pruebas
+## 8. Integración con el shell de clase
 
-`pruebas.sh` (invocable con `make test`) ejercita los 52 escenarios del proyecto: cada comando, cada requisito acumulativo, la selección de interfaz (`-c`, `--cli`, `isatty`) y los casos borde (archivo vacío, archivo sin salto final, línea de 8 KB, índices inválidos, comandos sin archivo abierto, apertura imposible). Verifica tanto lo que el editor imprime como los bytes que quedan realmente en el disco.
+El editor se integra al shell de la asignatura mediante una **categoría nueva**, `aplicaciones`, que agrupa los programas externos interactivos a los que el shell cede la terminal. Aporta dos comandos:
+
+* `editor [-c] [archivo]` — lanza el editor cediéndole la terminal (`access`, `tcgetattr`, `fork`, `execv`, `waitpid`, `tcsetattr`). Las banderas se reenvían tal cual, así que `editor -c` abre el intérprete de línea del editor desde el shell.
+* `editor_cmd <archivo> "<órdenes;...>"` — le inyecta órdenes por una tubería (`pipe`, `fork`, `dup2`, `execv`, `write`, `close`, `waitpid`).
+
+El segundo funciona precisamente por la decisión de la sección 2: como el editor elige su interfaz con `isatty()`, al recibir una tubería en vez de un teclado entra solo en modo intérprete.
+
+El análisis completo —por qué no encajaba en `datos` ni en `monitoreo`, por qué no basta `p_exec`, y por qué el shell debe guardar y reponer el estado del TTY— está en **[INTEGRACION_SHELL.md](INTEGRACION_SHELL.md)**. El código del shell modificado está en [`shell/`](shell/).
+
+---
+
+## 9. Pruebas
+
+`pruebas.sh` (invocable con `make test`) ejercita los 68 escenarios del proyecto: cada comando, cada requisito acumulativo, la selección de interfaz (`-c`, `--cli`, `isatty`) la integración con el shell de clase y los casos borde (archivo vacío, archivo sin salto final, línea de 8 KB, índices inválidos, comandos sin archivo abierto, apertura imposible). Verifica tanto lo que el editor imprime como los bytes que quedan realmente en el disco.
 
 Los atajos del modo visual también se prueban: como sólo arrancan si `isatty()` ve una terminal, el script usa `script(1)` para darles un pseudo-terminal y les envía pulsaciones reales (`` para `Ctrl+D`, etc.). Hacen falta pausas entre teclas porque cada vuelta al modo raw usa `TCSAFLUSH`, que descarta la entrada pendiente. Se omiten con `SIN_VISUAL=1`.

@@ -47,7 +47,18 @@ Restricción del parcial: *"Queda prohibido el uso de las funciones de alto nive
 
 ---
 
-## 5. El detalle que importa: cómo borra `d [n]`
+## 5. Integración con el shell (categoría `aplicaciones`)
+
+| Comando del shell | Llamadas al sistema | Dónde |
+| :--- | :--- | :--- |
+| `editor [archivo]` | `access`, `tcgetattr`, `fork`, `execv`, `waitpid`, `tcsetattr` | `cmd_editor()` — `shell/cat_aplicaciones.c` |
+| `editor_cmd <archivo> "<ordenes>"` | `pipe`, `fork`, `dup2`, `execv`, `write`, `close`, `waitpid` | `cmd_editor_cmd()` — `shell/cat_aplicaciones.c` |
+
+`tcgetattr`/`tcsetattr` no son decorativos: el editor deja el TTY en modo crudo y podría morir sin restaurarlo, así que el shell guarda ese estado antes de ceder la terminal y lo repone al recuperarla. Ver [INTEGRACION_SHELL.md](INTEGRACION_SHELL.md).
+
+---
+
+## 6. El detalle que importa: cómo borra `d [n]`
 
 El enunciado pide, literalmente, *"desplazando los bytes posteriores y truncando"*. Así se implementa en `archivo_borrar_linea()`:
 
@@ -73,7 +84,7 @@ Sin el paso 4 el archivo conservaría al final los bytes de la línea vieja. És
 
 ---
 
-## 6. Verificación de errores
+## 7. Verificación de errores
 
 La rúbrica pide *"Verificación de retornos (ej. si open devuelve -1), usando perror() apropiadamente"*. En este proyecto:
 
