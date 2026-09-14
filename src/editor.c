@@ -45,24 +45,62 @@ void editor_pantalla_bienvenida(EstadoEditor *e) {
         "      ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝   ╚═╝      "
     };
     
+    // La mascota del editor, que acompaña al logo para que la presentación no
+    // sea sólo letras. A diferencia del logo, es ASCII puro: cada carácter ocupa
+    // un byte, así que aquí strlen() sí coincide con el ancho en columnas.
+    char *perro[] = {
+        "   /^-----^\\",
+        "   V  o o  V",
+        "    |  Y  |",
+        "     \\ Q /",
+        "     / - \\",
+        "     |    \\",
+        "     |     \\    )",
+        "     || (___\\===="
+    };
+
     int num_lineas = 13;
     int ancho_visual = 45; // Ancho visual en columnas (fijo, sin contar bytes UTF-8 extra)
-    
-    // Calculamos las coordenadas para el bloque de 13x45 caracteres
+    int num_lineas_perro = 8;
+    int ancho_perro = 17;  // Largo de la línea más ancha de la mascota
+    int separacion = 4;    // Columnas en blanco entre la mascota y el logo
+
+    // La mascota sólo aparece si la terminal da el ancho suficiente para las dos
+    // cosas; en una ventana estrecha el logo se centra solo, como antes.
+    int con_perro = (e->columnasPantalla >= ancho_perro + separacion + ancho_visual + 4);
+    int ancho_total = con_perro ? ancho_perro + separacion + ancho_visual : ancho_visual;
+
+    // Calculamos las coordenadas del bloque completo (mascota + logo)
     int start_y = (e->filasPantalla / 2) - (num_lineas / 2);
-    int start_x = (e->columnasPantalla / 2) - (ancho_visual / 2);
-    
+    int start_x = (e->columnasPantalla / 2) - (ancho_total / 2);
+    int logo_x = con_perro ? start_x + ancho_perro + separacion : start_x;
+
     char buf[64];
-    
-    // Escribimos el mensaje usando color (Cyan brillante \x1b[1;36m)
-    write(STDOUT_FILENO, "\x1b[1;36m", 7);
-    
+
+    if (con_perro) {
+        // Amarillo brillante: contrasta con el rojo del logo y hace que la
+        // mascota se lea como una figura aparte y no como parte del texto.
+        write(STDOUT_FILENO, "\x1b[1;33m", 7);
+
+        // La mascota es más baja que el logo, así que la centramos contra él.
+        int perro_y = start_y + (num_lineas - num_lineas_perro) / 2;
+        for (int i = 0; i < num_lineas_perro; i++) {
+            // --- CALL SYSTEM: write() ---
+            snprintf(buf, sizeof(buf), "\x1b[%d;%dH", perro_y + i, start_x);
+            write(STDOUT_FILENO, buf, strlen(buf));
+            write(STDOUT_FILENO, perro[i], strlen(perro[i]));
+        }
+    }
+
+    // Escribimos el mensaje usando color (Rojo brillante \x1b[1;31m)
+    write(STDOUT_FILENO, "\x1b[1;31m", 7);
+
     for (int i = 0; i < num_lineas; i++) {
         // --- CALL SYSTEM: write() ---
         // Posicionamos el cursor fila por fila en la coordenada calculada
-        snprintf(buf, sizeof(buf), "\x1b[%d;%dH", start_y + i, start_x);
+        snprintf(buf, sizeof(buf), "\x1b[%d;%dH", start_y + i, logo_x);
         write(STDOUT_FILENO, buf, strlen(buf));
-        
+
         // Escribimos la línea de ASCII Art (strlen se calcula en bytes dinámicamente)
         write(STDOUT_FILENO, ascii_art[i], strlen(ascii_art[i]));
     }
