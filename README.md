@@ -175,3 +175,6 @@ SIN_VISUAL=1 bash pruebas.sh # omite las pruebas del modo visual, que son lentas
 ```
 
 Termina con código 0 si todo pasa e informa qué falló en caso contrario.
+
+## 8. Video de sustentacion
+Link: https://youtu.be/0OXEvxRlVm8
