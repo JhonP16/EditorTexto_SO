@@ -2,6 +2,8 @@
 
 Bienvenido al **Editor de Texto**: un editor ágil y minimalista que opera directamente en modo texto (CLI), construido para funcionar desde la consola de Linux sin requerir interfaces gráficas pesadas.
 
+video sustentación: https://youtu.be/0OXEvxRlVm8
+
 ---
 
 ## 1. Compilación e Inicio
